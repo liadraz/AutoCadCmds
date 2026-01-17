@@ -24,7 +24,7 @@ namespace AutoCadCmds
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
-            
+
             PromptEntityOptions peo = new PromptEntityOptions("\nSelect an entity: ");
             PromptEntityResult per = ed.GetEntity(peo);
 
@@ -44,8 +44,10 @@ namespace AutoCadCmds
             Document doc = Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
 
-            PromptEntityOptions pso = new PromptEntityOptions("\nSelect Entities: ");
-            PromptSelectionResult psr = ed.GetSelection();
+            PromptSelectionOptions pso = new PromptSelectionOptions();
+            pso.MessageForAdding = "\nSelect Entities: ";
+
+            PromptSelectionResult psr = ed.GetSelection(pso);
 
             if (psr.Status == PromptStatus.OK)
             {
@@ -53,6 +55,9 @@ namespace AutoCadCmds
                 ed.WriteMessage($"\nYou selected {ss.Count} entities.");
             }
         }
+
+        // Single Selection uses PromptEntityOptions with ed.GetEntity which returns PromptEntityResult containing one ObjectId
+        // Multiple Selection uses PromptSelectionOptions with ed.GetSelection which returns PromptSelectionResult containing a SelectionSet of ObjectIds
 
         [CommandMethod("CreateLine")]
         public void CreateLine()
@@ -136,7 +141,7 @@ namespace AutoCadCmds
                 Point3d center = new Point3d(0, 0, 0);
                 //      Vector3d.ZAxis - When creating a circle, AutoCAD needs to know its "Normal" (which way it faces). Usually, this is the Z-axis (0,0,1)
                 Circle circle = new Circle(center, Vector3d.ZAxis, radius);
-                
+
                 btr.AppendEntity(circle);
                 tr.AddNewlyCreatedDBObject(circle, true);
 
@@ -164,7 +169,7 @@ namespace AutoCadCmds
 
                 //  define the move vector
                 Vector3d moveVec3d = new Vector3d(50.0, 50.0, 0);
-                
+
                 //  create the transformation matrix
                 Matrix3d moveMatrix = Matrix3d.Displacement(moveVec3d);
 
@@ -221,6 +226,116 @@ namespace AutoCadCmds
             }
 
             ed.WriteMessage("\nCloned entity created in red color.");
-        }   
+        }
+
+        [CommandMethod("SelectOnlyLines")]
+        public void SelectOnlyLines()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
+
+            // Create a TypedValue array to define the filter rules
+            TypedValue[] filterValues = new TypedValue[1];
+            filterValues[0] = new TypedValue((int)DxfCode.Start, "Line");
+
+            SelectionFilter filter = new SelectionFilter(filterValues);
+
+            PromptSelectionOptions pso = new PromptSelectionOptions();
+            pso.MessageForAdding = "\nSelect objects (Only lines will be picked): ";
+
+            PromptSelectionResult psr = ed.GetSelection(pso, filter);
+
+            if (psr.Status == PromptStatus.OK)
+            {
+                SelectionSet ss = psr.Value;
+                ed.WriteMessage($"\nYou selected {ss.Count} line entities.");
+
+                using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
+                {
+                    foreach (SelectedObject selObj in ss)
+                    {
+                        // We are sure that only lines are selected due to the filter
+                        Line line = tr.GetObject(selObj.ObjectId, OpenMode.ForWrite) as Line;
+                        line.ColorIndex = 3; // Change color to green
+                    }
+
+                    tr.Commit();
+                }
+            }
+        }
+
+        // TypedValue is a structure that represents a single data item consisting of a type code and a value. Based on DXF codes.
+        // Each object in Autocad save in DXF Drawing Exchange Format. Every information has a numeric code
+        //      DxfCode.Start (code 0) represents the entity type (e.g., Line, Circle, Polyline)
+        //      DxfCode.LayerName (code 8) represents the layer name
+        // SelectionFilter is the filter that passed to the method GetSelection to limit the selection to specific criteria.
+        // SelectionsSet is a collection of the selected ObjectsIds returned by the selection methods
+        //      To open and work with the actual entities, you need to use a Transaction getObject method.
+
+        [CommandMethod("OrderedOffset")]
+        public void OrderedOffset()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
+            Database db = doc.Database;
+
+            TypedValue[] filterList = new TypedValue[] { new TypedValue((int)DxfCode.Start, "LWPOLYLINE") };
+            SelectionFilter filter = new SelectionFilter(filterList);
+
+            PromptSelectionOptions pso = new PromptSelectionOptions();
+            pso.MessageForAdding = "\nSelect two nested closed polylines: ";
+
+            PromptSelectionResult psr = ed.GetSelection(pso, filter);
+            if (psr.Status != PromptStatus.OK || psr.Value.Count != 2)
+            {
+                ed.WriteMessage("\nPlease select exactly TWO polylines.");
+                return;
+            }
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                Polyline polyA = tr.GetObject(psr.Value[0].ObjectId, OpenMode.ForWrite) as Polyline;
+                Polyline polyB = tr.GetObject(psr.Value[1].ObjectId, OpenMode.ForWrite) as Polyline;
+
+                Polyline outerPoly, innerPoly;
+                if (polyA.Area > polyB.Area)
+                {
+                    outerPoly = polyA;
+                    innerPoly = polyB;
+                }
+                else
+                {
+                    outerPoly = polyB;
+                    innerPoly = polyA;
+                }
+
+                outerPoly.ColorIndex = 1; // Red - Index 1
+                innerPoly.ColorIndex = 3; // Green - Index 3
+
+                BlockTable bt = tr.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
+                BlockTableRecord btr = tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite) as BlockTableRecord;
+
+                DBObjectCollection offsetsOuter = outerPoly.GetOffsetCurves(5.0);
+                foreach (Entity ent in offsetsOuter)
+                {
+                    ent.ColorIndex = 2; // Yellow - Index 2
+                    btr.AppendEntity(ent);
+                    tr.AddNewlyCreatedDBObject(ent, true);
+                }
+
+                DBObjectCollection offsetsInner= innerPoly.GetOffsetCurves(5.0);
+                foreach (Entity ent in offsetsInner)
+                {
+                    ent.ColorIndex = 4; // Cyan - Index 4
+                    btr.AppendEntity(ent);
+                    tr.AddNewlyCreatedDBObject(ent, true);
+                }
+
+                tr.Commit();
+            }
+        }
+
+        // DBObjectCollection is a special array used to store entities that was created by geometric actions like Offset or Explode. 
+        //      In order to use its results we need to iterate its results
     }
 } 
