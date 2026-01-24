@@ -286,49 +286,72 @@ namespace AutoCadCmds
             pso.MessageForAdding = "\nSelect two nested closed polylines: ";
 
             PromptSelectionResult psr = ed.GetSelection(pso, filter);
-            if (psr.Status != PromptStatus.OK || psr.Value.Count != 2)
+            if (psr.Status != PromptStatus.OK)
             {
-                ed.WriteMessage("\nPlease select exactly TWO polylines.");
                 return;
             }
 
             using (Transaction tr = db.TransactionManager.StartTransaction())
             {
-                Polyline polyA = tr.GetObject(psr.Value[0].ObjectId, OpenMode.ForWrite) as Polyline;
-                Polyline polyB = tr.GetObject(psr.Value[1].ObjectId, OpenMode.ForWrite) as Polyline;
+                Polyline p1 = tr.GetObject(psr.Value[0].ObjectId, OpenMode.ForWrite) as Polyline;
+                Polyline p2 = tr.GetObject(psr.Value[1].ObjectId, OpenMode.ForWrite) as Polyline;
 
-                Polyline outerPoly, innerPoly;
-                if (polyA.Area > polyB.Area)
-                {
-                    outerPoly = polyA;
-                    innerPoly = polyB;
-                }
-                else
-                {
-                    outerPoly = polyB;
-                    innerPoly = polyA;
-                }
+                Polyline outer = (p1.Area > p2.Area) ? p1 : p2;
+                Polyline inner = (p1.Area > p2.Area) ? p2 : p1;
 
-                outerPoly.ColorIndex = 1; // Red - Index 1
-                innerPoly.ColorIndex = 3; // Green - Index 3
+                outer.ColorIndex = 1; // Red - Index 1
+                inner.ColorIndex = 3; // Green - Index 3
 
                 BlockTable bt = tr.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
                 BlockTableRecord btr = tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite) as BlockTableRecord;
 
-                DBObjectCollection offsetsOuter = outerPoly.GetOffsetCurves(5.0);
-                foreach (Entity ent in offsetsOuter)
+                ObjectId outerOffsetId = CreateInternalOffset(outer, 2, btr, tr, 2);
+                ObjectId innerOffsetId = CreateInternalOffset(inner, 2, btr, tr, 4);
+
+                if (outerOffsetId != ObjectId.Null)
                 {
-                    ent.ColorIndex = 2; // Yellow - Index 2
-                    btr.AppendEntity(ent);
-                    tr.AddNewlyCreatedDBObject(ent, true);
+                    Polyline outerOffset = tr.GetObject(outerOffsetId, OpenMode.ForRead) as Polyline;
+                    CreateHatchBetween(outer, outerOffset, "SOLID", btr, tr);
                 }
 
-                DBObjectCollection offsetsInner= innerPoly.GetOffsetCurves(5.0);
-                foreach (Entity ent in offsetsInner)
+                if (innerOffsetId != ObjectId.Null)
                 {
-                    ent.ColorIndex = 4; // Cyan - Index 4
-                    btr.AppendEntity(ent);
-                    tr.AddNewlyCreatedDBObject(ent, true);
+                    Polyline innerOffset = (Polyline)tr.GetObject(innerOffsetId, OpenMode.ForRead);
+                    CreateHatchBetween(inner, innerOffset, "SOLID", btr, tr);
+                }
+
+                if (outerOffsetId != ObjectId.Null && inner != null)
+                {
+                    Polyline readPoly = tr.GetObject(outerOffsetId, OpenMode.ForRead) as Polyline;
+
+                    CreateHatchBetween(readPoly, inner, "ANSI31", btr, tr);
+                }
+
+                if (innerOffsetId != ObjectId.Null)
+                {
+                    // 1. Get the inner-most polyline object
+                    Polyline innerMostPoly = (Polyline)tr.GetObject(innerOffsetId, OpenMode.ForRead);
+
+                    // 2. Create the hatch object
+                    Hatch coreHatch = new Hatch();
+                    coreHatch.Normal = innerMostPoly.Normal;
+                    coreHatch.Elevation = innerMostPoly.Elevation;
+
+                    coreHatch.SetHatchPattern(HatchPatternType.PreDefined, "SOLID");
+                    coreHatch.ColorIndex = 6;
+
+                    // 3. Add to Database
+                    btr.AppendEntity(coreHatch);
+                    tr.AddNewlyCreatedDBObject(coreHatch, true);
+
+                    // 4. Create the loop (Contains only ONE object)
+                    ObjectIdCollection coreLoop = new ObjectIdCollection();
+                    coreLoop.Add(innerOffsetId);
+
+                    // 5. Append and Evaluate
+                    // For a single loop, HatchLoopTypes.Default works perfectly
+                    coreHatch.AppendLoop(HatchLoopTypes.Default, coreLoop);
+                    coreHatch.EvaluateHatch(true);
                 }
 
                 tr.Commit();
@@ -337,5 +360,56 @@ namespace AutoCadCmds
 
         // DBObjectCollection is a special array used to store entities that was created by geometric actions like Offset or Explode. 
         //      In order to use its results we need to iterate its results
+
+
+        // Helper: Create an internal offset and return its ObjectId
+        private ObjectId CreateInternalOffset(Polyline poly, double dist, BlockTableRecord btr, Transaction tr, int color)
+        {
+            DBObjectCollection collection = poly.GetOffsetCurves(dist);
+            if (collection.Count == 0) return ObjectId.Null;
+
+            Polyline offsetPoly = collection[0] as Polyline;
+            if (offsetPoly.Area > poly.Area)
+            {
+                offsetPoly.Dispose();
+                collection = poly.GetOffsetCurves(-dist);
+                if (collection.Count == 0) return ObjectId.Null;
+                offsetPoly = (Polyline)collection[0];
+            }
+
+            offsetPoly.ColorIndex = color;
+            btr.AppendEntity(offsetPoly);
+            tr.AddNewlyCreatedDBObject(offsetPoly, true);
+
+            return offsetPoly.ObjectId;
+        }
+
+        // Helper: Create a hatch between two polylines
+        private void CreateHatchBetween(Polyline outer, Polyline inner, string pattern, BlockTableRecord btr, Transaction tr)
+        {
+            // Create a new Hatch object
+            Hatch hatch = new Hatch();
+            hatch.Normal = outer.Normal;
+            hatch.Elevation = outer.Elevation;
+
+            // Note: The Hatch must be added to the BlockTableRecord before setting its properties
+            btr.AppendEntity(hatch);
+            tr.AddNewlyCreatedDBObject(hatch, true);
+
+            hatch.SetHatchPattern(HatchPatternType.PreDefined, pattern);
+            hatch.PatternScale = 20.0;
+
+            // Define the boundaries for the hatch
+            ObjectIdCollection outerLoop = new ObjectIdCollection();
+            outerLoop.Add(outer.ObjectId);
+            
+            ObjectIdCollection innerLoop = new ObjectIdCollection();
+            innerLoop.Add(inner.ObjectId);
+
+            hatch.AppendLoop(HatchLoopTypes.Default, outerLoop);
+            hatch.AppendLoop(HatchLoopTypes.Default, innerLoop);
+
+            hatch.EvaluateHatch(true);
+        }
     }
-} 
+}
