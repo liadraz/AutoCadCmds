@@ -4,6 +4,9 @@ using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
 using Autodesk.AutoCAD.GraphicsSystem;
 using Autodesk.AutoCAD.Runtime;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace AutoCadCmds
 {
@@ -411,5 +414,390 @@ namespace AutoCadCmds
 
             hatch.EvaluateHatch(true);
         }
+
+
+        // Command to create an outline from selected polylines using region union
+        [CommandMethod("CreateOutline")]
+        public void CreateOutline()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
+            Database db = doc.Database;
+
+            // 1. Selection of polylines
+            PromptSelectionOptions pso = new PromptSelectionOptions();
+            pso.MessageForAdding = "\nSelect the main contour and balconies (Polylines): ";
+            TypedValue[] filter = { new TypedValue((int)DxfCode.Start, "LWPOLYLINE") };
+            PromptSelectionResult psr = ed.GetSelection(pso, new SelectionFilter(filter));
+
+            if (psr.Status != PromptStatus.OK) return;
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                BlockTableRecord btr = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+
+                // 2. Convert all selected polylines to Regions
+                DBObjectCollection regions = new DBObjectCollection();
+                foreach (SelectedObject so in psr.Value)
+                {
+                    Polyline pline = (Polyline)tr.GetObject(so.ObjectId, OpenMode.ForRead);
+                    DBObjectCollection plineCol = new DBObjectCollection { pline };
+
+                    // CreateRegions returns a collection of Regions created from the curves
+                    // Polylines must be closed and on the same level to create Regions
+                    DBObjectCollection createdRegions = Region.CreateFromCurves(plineCol);
+                    foreach (Region reg in createdRegions)
+                    {
+                        regions.Add(reg);
+                    }
+                }
+
+                if (regions.Count < 2) return;
+
+                // 3. Perform Union Operation
+                Region mainRegion = (Region)regions[0];
+                for (int i = 1; i < regions.Count; i++)
+                {
+                    Region nextRegion = (Region)regions[i];
+                    // BooleanOperation modifies the mainRegion itself
+                    mainRegion.BooleanOperation(BooleanOperationType.BoolUnite, nextRegion);
+                    nextRegion.Dispose(); // Clear the temporary region from memory
+                }
+
+                // 4. Add the final region to database temporarily to extract boundaries
+                btr.AppendEntity(mainRegion); 
+                tr.AddNewlyCreatedDBObject(mainRegion, true);
+
+                // 5. In a real scenario, we would now extract the polyline from the region.
+                // For now, let's change its color so you can see the result.
+                mainRegion.ColorIndex = 1; // Red
+
+                tr.Commit();
+            }
+        }
+
+        [CommandMethod("SubtractBalconies")]
+        public void SubtractBalconies()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
+            Database db = doc.Database;
+
+            // 1. Selection
+            PromptSelectionOptions pso = new PromptSelectionOptions();
+            pso.MessageForAdding = "\nSelect main contour and internal balconies: ";
+            TypedValue[] filter = { new TypedValue((int)DxfCode.Start, "LWPOLYLINE") };
+            PromptSelectionResult psr = ed.GetSelection(pso, new SelectionFilter(filter));
+
+            if (psr.Status != PromptStatus.OK) return;
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                BlockTableRecord btr = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+
+                // 2. Separate the Largest Polyline (Main Contour) from the rest (Balconies)
+                Polyline mainPline = null;
+                List<Polyline> balconies = new List<Polyline>();
+                double maxArea = -1.0;
+
+                foreach (SelectedObject so in psr.Value)
+                {
+                    Polyline pl = (Polyline)tr.GetObject(so.ObjectId, OpenMode.ForRead);
+                    if (pl.Area > maxArea)
+                    {
+                        if (mainPline != null) balconies.Add(mainPline);
+                        maxArea = pl.Area;
+                        mainPline = pl;
+                    }
+                    else
+                    {
+                        balconies.Add(pl);
+                    }
+                }
+
+                if (mainPline == null) return;
+
+                // 3. Convert Main Contour to Region
+                DBObjectCollection mainCol = new DBObjectCollection { mainPline };
+                DBObjectCollection mainRegs = Region.CreateFromCurves(mainCol);
+                Region mainRegion = (Region)mainRegs[0];
+
+                // 4. Subtract each balcony region from the main region
+                foreach (Polyline balcPline in balconies)
+                {
+                    DBObjectCollection balcCol = new DBObjectCollection { balcPline };
+                    DBObjectCollection balcRegs = Region.CreateFromCurves(balcCol);
+
+                    foreach (Region balcReg in balcRegs)
+                    {
+                        // BooleanOperationType.BoolSubtract performs the subtraction
+                        mainRegion.BooleanOperation(BooleanOperationType.BoolSubtract, balcReg);
+                        balcReg.Dispose();
+                    }
+                }
+
+                // 5. Add result to database
+                mainRegion.ColorIndex = 1; // Red to see the final shape
+                btr.AppendEntity(mainRegion);
+                tr.AddNewlyCreatedDBObject(mainRegion, true);
+
+                tr.Commit();
+            }
+        }
+
+        [CommandMethod("CleanOutlineManual")]
+        public void CleanOutlineManual()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
+            Database db = doc.Database;
+
+            // 1. בחירה
+            TypedValue[] filterList = new TypedValue[] 
+            { 
+                new TypedValue((int)DxfCode.Start, "LWPOLYLINE") 
+            };
+            SelectionFilter filter = new SelectionFilter(filterList);
+
+            PromptSelectionOptions pso = new PromptSelectionOptions();
+            pso.MessageForAdding = "\nSelect main contour and balconies: ";
+
+            // הוספת הפילטר לפקודת הבחירה - אוטוקאד יסנן לבד קווים, מעגלים ובלוקים
+            PromptSelectionResult psr = ed.GetSelection(pso, filter);
+            if (psr.Status != PromptStatus.OK) return;
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
+
+                Polyline originalMainPline = null;
+                double maxOriginalArea = -1.0;
+
+                foreach (SelectedObject so in psr.Value)
+                {
+                    Polyline pl = (Polyline)tr.GetObject(so.ObjectId, OpenMode.ForRead);
+                    // חישוב שטח מהיר (מתעלם מפתוח/סגור לצורך הזיהוי בלבד)
+                    if (pl.Area > maxOriginalArea)
+                    {
+                        maxOriginalArea = pl.Area;
+                        originalMainPline = pl;
+                    }
+                }
+                
+                // 2. יצירת ה-Region המעובד (אותה לוגיקה מקודם לחיסור מרפסות)
+                Region finalRegion = CreateProcessedRegion(psr, tr);
+                if (finalRegion == null) return;
+
+                // 3. פירוק ה-Region לקווים בודדים
+                DBObjectCollection explodedObjects = new DBObjectCollection();
+                finalRegion.Explode(explodedObjects);
+
+                // המרה לרשימה רגילה של Curves (קווים וקשתות)
+                List<Curve> rawCurves = new List<Curve>();
+                foreach (DBObject obj in explodedObjects)
+                {
+                    if (obj is Curve c) rawCurves.Add(c);
+                    else obj.Dispose();
+                }
+
+                // 4. הפעלת מנוע החיבור הידני שלנו
+                List<Polyline> loops = JoinCurvesToPolylines(rawCurves);
+
+                // 5. מציאת הלולאה הגדולה ביותר (הקונטור החיצוני)
+                Polyline finalPoly = loops.OrderByDescending(p => p.Area).FirstOrDefault();
+
+                if (finalPoly != null)
+                {
+                    finalPoly.ColorIndex = 1; // אדום
+                    finalPoly.Closed = true;
+                    btr.AppendEntity(finalPoly);
+                    tr.AddNewlyCreatedDBObject(finalPoly, true);
+
+                    // ניקוי שאר הלולאות (חורים/איים) שלא נבחרו
+                    foreach (var p in loops)
+                    {
+                        if (p != finalPoly) p.Dispose();
+                    }
+
+                    if (originalMainPline != null)
+                    {
+                        // חייבים לשדרג למצב כתיבה לפני מחיקה
+                        if (!originalMainPline.IsWriteEnabled) originalMainPline.UpgradeOpen();
+
+                        originalMainPline.Erase();
+                    }
+
+                    ed.WriteMessage("\nOld contour deleted, new contour created.");
+                }
+
+                finalRegion.Dispose();
+                foreach (Curve c in rawCurves) c.Dispose();
+
+                tr.Commit();
+            }
+        }
+
+        // --- המנוע לחיבור קווים (מחליף את CreateByJoiningCurves) ---
+        private List<Polyline> JoinCurvesToPolylines(List<Curve> curves)
+        {
+            List<Polyline> polylines = new List<Polyline>();
+            double tol = 0.001; // סובלנות לחיבור נקודות
+
+            while (curves.Count > 0)
+            {
+                Polyline pl = new Polyline();
+                Curve currentCurve = curves[0];
+                curves.RemoveAt(0);
+
+                // הוספת ההתחלה והסוף של הקו הראשון
+                AddCurveToPolyline(pl, currentCurve, false);
+
+                bool curveAdded = true;
+                while (curveAdded)
+                {
+                    curveAdded = false;
+                    Point3d connectPoint = pl.GetPoint3dAt(pl.NumberOfVertices - 1);
+
+                    // חיפוש הקו הבא שמתחבר לנקודה האחרונה
+                    for (int i = 0; i < curves.Count; i++)
+                    {
+                        Curve candidate = curves[i];
+
+                        // בדיקה אם ההתחלה שלו מתחברת לסוף שלנו
+                        if (candidate.StartPoint.DistanceTo(connectPoint) < tol)
+                        {
+                            AddCurveToPolyline(pl, candidate, false); // כיוון רגיל
+                            curves.RemoveAt(i);
+                            curveAdded = true;
+                            break;
+                        }
+                        // בדיקה אם הסוף שלו מתחבר לסוף שלנו (הוא הפוך)
+                        else if (candidate.EndPoint.DistanceTo(connectPoint) < tol)
+                        {
+                            AddCurveToPolyline(pl, candidate, true); // כיוון הפוך
+                            curves.RemoveAt(i);
+                            curveAdded = true;
+                            break;
+                        }
+                    }
+                }
+                pl.Closed = true;
+                polylines.Add(pl);
+            }
+            return polylines;
+        }
+
+        // פונקציית עזר להמרת Line/Arc לקודקוד בפולילין
+        private void AddCurveToPolyline(Polyline pl, Curve curve, bool reverse)
+        {
+            // אם זה הקו הראשון בפולילין, צריך להוסיף את נקודת ההתחלה
+            if (pl.NumberOfVertices == 0)
+            {
+                Point3d start = reverse ? curve.EndPoint : curve.StartPoint;
+                pl.AddVertexAt(0, new Point2d(start.X, start.Y), 0, 0, 0);
+            }
+
+            // הוספת הנקודה השנייה וה-Bulge
+            Point3d end = reverse ? curve.StartPoint : curve.EndPoint;
+            double bulge = 0.0;
+
+            if (curve is Arc arc)
+            {
+                // חישוב Bulge (כיפוף) לקשת
+                double angle = arc.EndAngle - arc.StartAngle;
+                if (angle < 0) angle += 2 * Math.PI; // נרמול ל-2PI
+
+                // אם הכיוון הפוך, צריך להפוך את ה-Bulge
+                if (arc.Normal.Z < 0) angle = -angle; // טיפול במערכות קואורדינטות הפוכות
+
+                bulge = Math.Tan(angle / 4.0);
+                if (reverse) bulge = -bulge;
+            }
+
+            // הוספת הקודקוד החדש
+            // הערה: ה-Bulge תמיד מתווסף לקודקוד *הקודם*, אז מעדכנים אותו אחורה
+            if (bulge != 0.0)
+            {
+                pl.SetBulgeAt(pl.NumberOfVertices - 1, bulge);
+            }
+
+            pl.AddVertexAt(pl.NumberOfVertices, new Point2d(end.X, end.Y), 0, 0, 0);
+        }
+
+        private Region CreateProcessedRegion(PromptSelectionResult psr, Transaction tr)
+        {
+            List<Polyline> validPolys = new List<Polyline>();
+
+            foreach (SelectedObject so in psr.Value)
+            {
+                // קודם כל פותחים כ-Entity כללי כדי לא לקרוס
+                Entity ent = (Entity)tr.GetObject(so.ObjectId, OpenMode.ForRead);
+
+                // בדיקה 1: האם זה בכלל פולילין?
+                // השימוש במילה 'as' מנסה להמיר, ואם נכשל מחזיר null (במקום לזרוק שגיאה)
+                Polyline pl = ent as Polyline;
+
+                if (pl == null)
+                {
+                    // זה לא פולילין (אולי זה Line, Arc, Circle...)
+                    // פשוט מדלגים עליו
+                    continue;
+                }
+
+                // בדיקה 2: האם הוא סגור? (הלוגיקה ממקודם)
+                if (!pl.Closed)
+                {
+                    if (pl.StartPoint.DistanceTo(pl.EndPoint) < 0.01)
+                    {
+                        pl.UpgradeOpen();
+                        pl.Closed = true;
+                    }
+                    else
+                    {
+                        // פולילין פתוח לגמרי - מתעלמים
+                        continue;
+                    }
+                }
+
+                // אם הגענו לפה - זה פולילין תקין וסגור
+                validPolys.Add(pl);
+            }
+
+            // --- מכאן והלאה זה אותו קוד כמו קודם ---
+
+            if (validPolys.Count == 0) return null;
+
+            Polyline mainPline = validPolys.OrderByDescending(p => p.Area).First();
+
+            DBObjectCollection mainCol = new DBObjectCollection { mainPline };
+            DBObjectCollection mainRegs = Region.CreateFromCurves(mainCol);
+            Region mainRegion = (Region)mainRegs[0];
+
+            foreach (Polyline subPline in validPolys)
+            {
+                if (subPline == mainPline) continue;
+
+                try
+                {
+                    DBObjectCollection subCol = new DBObjectCollection { subPline };
+                    DBObjectCollection subRegs = Region.CreateFromCurves(subCol);
+                    foreach (Region subReg in subRegs)
+                    {
+                        mainRegion.BooleanOperation(BooleanOperationType.BoolSubtract, subReg);
+                        subReg.Dispose();
+                    }
+                }
+                catch { /* Ignore bad geometry */ }
+            }
+
+            return mainRegion;
+        }
     }
 }
+
+    // To convert a Region back to a Polyline, we need to extract its outer loop
+    // There are several ways to do this,
+    //      One way is to use the Brep class to access the faces and loops
+    //      Anpther is to create an Hatch from the Region and extract its boundary loops
