@@ -275,8 +275,8 @@ namespace AutoCadCmds
         // SelectionsSet is a collection of the selected ObjectsIds returned by the selection methods
         //      To open and work with the actual entities, you need to use a Transaction getObject method.
 
-        [CommandMethod("OrderedOffset")]
-        public void OrderedOffset()
+        [CommandMethod("ToGraphics")]
+        public void ToGraphics()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
@@ -308,8 +308,8 @@ namespace AutoCadCmds
                 BlockTable bt = tr.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
                 BlockTableRecord btr = tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite) as BlockTableRecord;
 
-                ObjectId outerOffsetId = CreateInternalOffset(outer, 2, btr, tr, 2);
-                ObjectId innerOffsetId = CreateInternalOffset(inner, 2, btr, tr, 4);
+                ObjectId outerOffsetId = CreateInternalOffset(outer, 0.2, btr, tr, 2);
+                ObjectId innerOffsetId = CreateInternalOffset(inner, 0.2, btr, tr, 4);
 
                 if (outerOffsetId != ObjectId.Null)
                 {
@@ -477,8 +477,8 @@ namespace AutoCadCmds
             }
         }
 
-        [CommandMethod("SubtractBalconies")]
-        public void SubtractBalconies()
+        [CommandMethod("SubtractPolylines")]
+        public void SubtractPolylines()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
@@ -547,14 +547,14 @@ namespace AutoCadCmds
             }
         }
 
-        [CommandMethod("CleanOutlineManual")]
-        public void CleanOutlineManual()
+        [CommandMethod("CreateContourOutline")]
+        public void CreateContourOutline()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
             Database db = doc.Database;
 
-            // 1. בחירה
+            // 1. Select
             TypedValue[] filterList = new TypedValue[] 
             { 
                 new TypedValue((int)DxfCode.Start, "LWPOLYLINE") 
@@ -564,7 +564,6 @@ namespace AutoCadCmds
             PromptSelectionOptions pso = new PromptSelectionOptions();
             pso.MessageForAdding = "\nSelect main contour and balconies: ";
 
-            // הוספת הפילטר לפקודת הבחירה - אוטוקאד יסנן לבד קווים, מעגלים ובלוקים
             PromptSelectionResult psr = ed.GetSelection(pso, filter);
             if (psr.Status != PromptStatus.OK) return;
 
@@ -578,7 +577,7 @@ namespace AutoCadCmds
                 foreach (SelectedObject so in psr.Value)
                 {
                     Polyline pl = (Polyline)tr.GetObject(so.ObjectId, OpenMode.ForRead);
-                    // חישוב שטח מהיר (מתעלם מפתוח/סגור לצורך הזיהוי בלבד)
+
                     if (pl.Area > maxOriginalArea)
                     {
                         maxOriginalArea = pl.Area;
@@ -586,7 +585,7 @@ namespace AutoCadCmds
                     }
                 }
                 
-                // 2. יצירת ה-Region המעובד (אותה לוגיקה מקודם לחיסור מרפסות)
+                // 2. Create Region
                 Region finalRegion = CreateProcessedRegion(psr, tr);
                 if (finalRegion == null) return;
 
@@ -741,8 +740,6 @@ namespace AutoCadCmds
 
                 if (pl == null)
                 {
-                    // זה לא פולילין (אולי זה Line, Arc, Circle...)
-                    // פשוט מדלגים עליו
                     continue;
                 }
 
@@ -756,16 +753,12 @@ namespace AutoCadCmds
                     }
                     else
                     {
-                        // פולילין פתוח לגמרי - מתעלמים
                         continue;
                     }
                 }
 
-                // אם הגענו לפה - זה פולילין תקין וסגור
                 validPolys.Add(pl);
             }
-
-            // --- מכאן והלאה זה אותו קוד כמו קודם ---
 
             if (validPolys.Count == 0) return null;
 
